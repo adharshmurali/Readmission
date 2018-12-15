@@ -1,0 +1,214 @@
+---
+title: "Association rule Mining in Patient readmission"
+output: html_notebook
+---
+
+```{r}
+#Importing the libraries for performing the analysis
+library(tidyverse)
+library(mlr)
+
+```
+
+```{r}
+#Now loading in the data into the notebook to start with the analysis
+#Now the given data has 101766 data points and 50 variables associated with each names.
+data=read.csv("Z:\\adharsh_hrqol_brfss/SI 671 Final Project/dataset_diabetes/diabetic_data.csv",stringsAsFactors = FALSE) %>% as.tibble()
+```
+#Filtering the dataset based on the inclusion and the exclusion criteria
+```{r}
+#Now with inputting the dataset throw away all the redundant data points so that the analysis can be carried forward
+#The filter condition is if a patient has more than one data entry keep only the first entry
+data=data %>% group_by(patient_nbr) %>% slice(1) %>% ungroup()
+#Throw away people in hospice or have expired during the treatment bcoz they are in the exclusion criteria for the analysis
+#Applying all the filter condition in all we have around 69980 patients in the dataset for the analysis.
+data=data %>% filter(!(discharge_disposition_id%in% 11 |discharge_disposition_id%in% 13 | discharge_disposition_id%in% 14)) 
+
+```
+#Preprocessing the dataset for the data values
+```{r}
+#Preprocessing the age values as the lower and higher age within the bandwidth to increase the number of features
+lower_age=lapply(data$age,function(x) stringr::str_match_all(x,stringr::regex('\\d+'))[[1]][1])
+maximum_age=lapply(data$age,function(x) (stringr::str_match_all(x,stringr::regex('\\d+'))[[1]][2]))
+```
+
+```{r}
+#Replacing all the question mark in the dataset as the Na
+data[data=='?']<-NA
+```
+
+```{r}
+#Now preprocessng the ordinal values to get the most of the information from them
+
+data=data %>% mutate(max_glu_serum=case_when(max_glu_serum=='>200'~2,max_glu_serum=='>300'~3,max_glu_serum=='Norm'~1,TRUE~0)) %>% 
+  mutate(A1Cresult=case_when(A1Cresult=='>7'~2,A1Cresult=='>8'~3,A1Cresult=='Norm'~1,TRUE~0)) %>% 
+  mutate(readmitted=case_when(readmitted=='>30'~0,readmitted=='<30'~1,TRUE~0)) %>% 
+  mutate(insulin=case_when(insulin=='Steady'~1,(insulin=='Up')||(insulin=='Down')~2,TRUE~0))
+  
+#Lets convert the categorical variables into factors for the classification problem.
+
+data=data %>% mutate_at(vars(race,gender,admission_type_id,discharge_disposition_id,admission_source_id,medical_specialty,diag_1,diag_2,diag_3,change,diabetesMed,readmitted),as.factor)
+
+```
+
+```{r}
+#Beleiving the diagosis as the major impact in predicting the patient readmission 
+#I plan to classify the patient ISD-9 codes into 9 categories
+data=data %>% mutate_at(vars(diag_1,diag_2,diag_3),as.numeric)
+data=data %>% mutate(diag_1=case_when((diag_1<140)~1,(diag_1>=140&diag_1<=239)~2,(diag_1>=240&diag_1<280)~3,(diag_1>=280&diag_1<290)~4,(diag_1>=290&diag_1<320)~5,(diag_1>=320&diag_1<390)~6,(diag_1>=390&diag_1<460)~7,(diag_1>=460&diag_1<520)~8,(diag_1>=520&diag_1<580)~9,(diag_1>=580&&diag_1<630)~10,(diag_1>=630&diag_1<680)~11,(diag_1>=680&diag_1<710)~12,(diag_1>=710&diag_1<740)~13,(diag_1>=740&diag_1<760)~14,(diag_1>=760&diag_1<780)~15,(diag_1>=780&diag_1<800)~16,(diag_1>=800&diag_1<1000)~17,TRUE~18)) %>% 
+  mutate(diag_2=case_when((diag_2<140)~1,(diag_2>=140&diag_2<=239)~2,(diag_2>=240&diag_2<280)~3,(diag_2>=280&diag_2<290)~4,(diag_2>=290&diag_2<320)~5,(diag_2>=320&diag_2<390)~6,(diag_2>=390&diag_2<460)~7,(diag_2>=460&diag_2<520)~8,(diag_2>=520&diag_2<580)~9,(diag_2>=580&&diag_2<630)~10,(diag_2>=630&diag_2<680)~11,(diag_2>=680&diag_2<710)~12,(diag_2>=710&diag_2<740)~13,(diag_2>=740&diag_2<760)~14,(diag_2>=760&diag_2<780)~15,(diag_2>=780&diag_2<800)~16,(diag_2>=800&diag_2<1000)~17,TRUE~18)) %>% 
+  mutate(diag_3=case_when((diag_3<140)~1,(diag_3>=140&diag_3<=239)~2,(diag_3>=240&diag_3<280)~3,(diag_3>=280&diag_3<290)~4,(diag_3>=290&diag_3<320)~5,(diag_3>=320&diag_3<390)~6,(diag_3>=390&diag_3<460)~7,(diag_3>=460&diag_3<520)~8,(diag_3>=520&diag_3<580)~9,(diag_3>=580&&diag_3<630)~10,(diag_3>=630&diag_3<680)~11,(diag_3>=680&diag_3<710)~12,(diag_3>=710&diag_3<740)~13,(diag_3>=740&diag_3<760)~14,(diag_3>=760&diag_3<780)~15,(diag_3>=780&diag_3<800)~16,(diag_3>=800&diag_3<1000)~17,TRUE~18))
+  
+```
+```{r}
+data=data %>% mutate(lower_age=as.numeric(lower_age)) %>% mutate(upper_age=as.numeric(maximum_age)) %>% 
+  mutate_at(vars(diag_1,diag_2,diag_3),as.factor)
+data$upper_age=lapply(data$upper_age,function(x) x-1)
+data$upper_age=as.numeric(data$upper_age)
+```
+
+```{r}
+#Now with all the preprocessing prepare the dataset for building classification.
+train_data=data %>% select(race,lower_age,upper_age,gender,admission_type_id,discharge_disposition_id,admission_source_id,time_in_hospital,medical_specialty,num_lab_procedures,num_procedures,num_medications,number_outpatient,number_emergency,number_inpatient,diag_1,diag_2,diag_3,number_diagnoses,max_glu_serum,A1Cresult,change,diabetesMed,insulin,readmitted) %>% as.data.frame()
+
+```
+```{r}
+assoc_data=data %>% filter(readmitted==1) %>% select(race,gender,admission_type_id,discharge_disposition_id,admission_source_id,medical_specialty,diag_1,change,diabetesMed,readmitted,diag_2,diag_3)
+
+assoc_data=train_data %>% filter(readmitted==1) %>% 
+  mutate_at(vars(names(train_data)),as.factor)
+```
+
+#Now building the machine learning algorithm to predict patient readmission
+```{r}
+#Initially building the random forest algorithm using the h2o package.
+options("h2o.use.data.table" = TRUE)
+h2o.init(nthreads=6)
+```
+
+```{r}
+#Now preparing the h2o frame for the train data
+h2o_train_data=as.h2o(train_data)
+```
+
+```{r}
+#Now trying to build a random forest
+model_rf=h2o.randomForest(x=c(1:23),y=24,training_frame = h2o_train_data,nfolds = 5,ntrees = 500)
+```
+```{r}
+h2o.varimp(model_rf)
+```
+```{r}
+dummy_cede=caret::dummyVars(~ ., data = assoc_data, fullRank = TRUE)
+```
+
+```{r}
+#Taking a mlr approach in building the classifier 
+#Classifier to be build are the random forest 
+#XGboost
+#Decision Tree
+#Also a Linear model
+```
+```{r}
+#Initially building a classif task
+train_task=makeClassifTask(data=train_data,target = "readmitted")
+lrn=makeLearner('classif.h2o.randomForest',par.vals = list(ntrees=1000),predict.type = 'prob')
+set.seed(1000)
+
+#model = train(learner = lrn,
+              #task = train_task)
+
+resample_method = makeResampleDesc('CV', iters=5)
+resample(lrn,train_task,resample_method,measures = list(auc))
+
+```
+
+```{r}
+#Getting the 5 most important variable in the dataset
+model=train(lrn,train_task)
+getLearnerModel(model) %>% h2o::h2o.varimp_plot(10)
+```
+
+```{r}
+#Implementing adaboost algorithm 
+
+lrn2=makeLearner('classif.ada',predict.type = 'prob')
+set.seed(1000)
+
+#model = train(learner = lrn,
+              #task = train_task)
+
+resample_method = makeResampleDesc('CV', iters=5)
+resample(lrn2,train_task,resample_method,measures = list(auc))
+```
+
+```{r}
+#Performing classification using the linear model(glm model with elastic search)
+lrn3=makeLearner('classif.h2o.glm',par.vals = list(alpha=0.5,nlambdas=500,lambda_search=TRUE),predict.type = 'prob')
+set.seed(1000)
+
+#model = train(learner = lrn,
+              #task = train_task)
+
+resample_method = makeResampleDesc('CV', iters=5)
+resample(lrn3,train_task,resample_method,measures = list(auc))
+```
+```{r}
+#Train the model to extract the important variable in the training
+model2=train(lrn3,train_task)
+getLearnerModel(model2) %>% h2o::h2o.varimp_plot(10)
+```
+
+```{r}
+#Loading the arules library for mining the rules
+#Converting the dataset with the factor values to numeric values to perform the apriori rule mining
+#Compute the rules with the support of 0.5 and confidence of 0.9
+#Only limit readmission to 1 as it signifies that the readmission was within 30 days.
+#Present the top 5 rules as the most important rules contributing to the readmission.
+library(arules)
+#Assoc_data is converted to the numeric and character for medical speciality
+#assoc_data=train_data %>% select(diag_1,diag_2,diag_3,readmitted)
+rules=apriori(data=assoc_data,parameter = list(supp=0.5,conf=0.9,maxlen=10,minlen=2,maxtime=10))
+rules_conf <- sort (rules, by="support", decreasing=TRUE)
+rules.sub <- subset(rules_conf, subset = rhs %in% "readmitted=1")
+```
+
+```{r}
+lhs_rules=as(lhs(rules.sub), "list")
+rhs_rules=as(rhs(rules.sub), "list")
+quality_rules=as(quality(rules.sub),"list")[[1]]
+plot(rules.sub,method = 'matrix',engine = '3d')
+```
+
+```{r}
+b=data.frame(rules=as.character(lhs_rules),quality=quality_rules)
+b$rules=lapply(b$rules,function(x) stringr::str_replace_all(x,stringr::regex('c\\(|\\)'),''))
+b$rules=as.character(b$rules)
+#b %>% group_by(rules) %>% summarise(n())
+c=b [c(8:9,17,19,28),] 
+```
+
+```{r}
+library(ggplot2)
+ggplot(data = c ,aes(rules,quality),colour=(rules))+geom_bar(stat="Identity",fill = "#FF6666")+coord_flip()
+#plot+cord_flip()
+```
+
+```{r}
+pred = predict(model, task = sonar.task)
+roc = generateThreshVsPerfData(pred, list(fpr, tpr))
+plotROCCurves(roc)
+```
+
+```{r}
+View(final_lhs_rules)
+View(final_rhs_rules)
+```
+```{r}
+train_data$readmitted
+```
+```{r}
+library(dummies)
+new_data=dummy.data.frame(assoc_data,sep = ".")
+```
+
